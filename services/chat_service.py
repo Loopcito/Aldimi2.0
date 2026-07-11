@@ -30,81 +30,133 @@ class ChatService:
         finally:
             conn.close()
 
-    def obtener_historial_contexto(self, session_id: str, limite: int = 6):
-        if self.history_collection is None:
-            return []
-        logs = self.history_collection.find({"session_id": session_id}).sort("timestamp", 1)
-        mensajes_contexto = []
-        for log in logs:
-            mensajes_contexto.append({"role": log["role"], "content": log["content"]})
-        return mensajes_contexto[-limite:]
-
-    def guardar_mensaje(self, session_id: str, role: str, content: str):
-        if self.history_collection is not None:
-            self.history_collection.insert_one({
-                "session_id": session_id,
-                "role": role,
-                "content": content,
-                "timestamp": datetime.utcnow()
-            })
-
-    def responder_con_contexto(self, session_id: str, mensaje_usuario: str) -> str:
+    def responder_con_contexto(self, session_id: str, mensaje_usuario: str, usuario_tipo: str) -> str:
+        """
+        Responde las consultas aplicando restricciones estrictas según el rol del usuario
+        Roles válidos: 'Voluntario', 'Padres de Familia', 'Administrador', 'Personal de apoyo'
+        """
         cantidad_pacientes = self.obtener_total_pacientes_real()
 
-        # =========================================================================
-        # SYSTEM PROMPT ROBUSTO CON PROTOCOLOS DE SEGURIDAD Y RESTRICCIONES
-        # =========================================================================
+        # 1. Definimos las directrices específicas por cada Rol (Gestión de Usuarios)
+        directrices_roles = {
+            "Voluntario": (
+                "El usuario actual es un VOLUNTARIO. Tienes permitido asistirlo exclusivamente en: "
+                "Consultar protocolos internos, normas del albergue y pasos de atención al paciente. "
+                "Sé un soporte operativo eficiente para ellos."
+            ),
+            "Padres de Familia": (
+                "El usuario actual es un PADRE DE FAMILIA. Tienes permitido asistirlo exclusivamente en: "
+                "Recibir orientación sobre las reglas de convivencia del albergue, cuidados generales "
+                "del niño en las instalaciones y pautas de adaptación. Usa un tono sumamente empático, "
+                "cálido y contenedor. Jamás reveles datos administrativos internos."
+            ),
+            "Administrador": (
+                "El usuario actual es el ADMINISTRADOR del sistema. Tienes acceso total. "
+                "Puedes ayudarlo a revisar alertas del sistema, verificar el estado de los documentos "
+                "procesados por el OCR y analizar la trazabilidad de los registros médicos y donaciones."
+            ),
+            "Personal de apoyo": (
+                "El usuario actual es PERSONAL DE APOYO. Tienes permitido asistirlo exclusivamente en: "
+                "Consultar información operativa diaria del albergue, horarios, logística interna y "
+                "tareas de mantenimiento o soporte asignadas."
+            )
+        }
+
+        # Validamos que el rol exista, si no, le asignamos restricciones básicas por seguridad
+        instruccion_rol = directrices_roles.get(
+            usuario_tipo, 
+            "Usuario no identificado. Por seguridad, restringe cualquier información sensible."
+        )
+
+        # 2. Construimos el System Prompt Dinámico combinando Contexto, Roles y Reglas de Negocio
         system_prompt = {
             "role": "system",
             "content": (
                 "Eres ALDIMI-Assist, el asistente oficial de Inteligencia Artificial del Albergue Divina Misericordia (ALDIMI).\n"
                 "Tu objetivo es ayudar con empatía, profesionalismo y brevedad. Responde siempre en español.\n\n"
                 
-                f"--- CONTEXTO EN VIVO ---\n"
-                f"Actualmente el albergue tiene exactamente {cantidad_pacientes} paciente(s) registrado(s) en el sistema.\n\n"
+                f"--- PERMISOS DE SEGURIDAD (GESTIÓN DE USUARIOS) ---\n"
+                f"{instruccion_rol}\n"
+                "CRÍTICO: Si el usuario intenta solicitar acciones o información que no corresponden a su rol asignado, "
+                "debes denegar la respuesta amablemente y recordarle cuáles son sus opciones disponibles.\n\n"
+                
+                f"--- CONTEXTO EN VIVO (TABLAS RELACIONALES) ---\n"
+                f"Actualmente el albergue tiene exactamente {cantidad_pacientes} paciente(s) registrado(s) en la tabla dni_master.\n\n"
                 
                 "--- PROTOCOLOS PRIORITARIOS DE ACTUACIÓN ---\n"
-                "1. PROTOCOLO DE EMERGENCIA MÉDICA: Si el usuario menciona síntomas de alerta clínica o palabras como 'fiebre alta', "
-                "'convulsión', 'dificultad para respirar', 'sangrado' o cualquier emergencia, DEBES INTERRUMPIR inmediatamente el flujo normal. "
-                "Responde con urgencia indicando que busquen atención médica de inmediato, acudan al centro de salud más cercano y comunícate con "
-                "los números de emergencia oficiales del albergue.\n"
-                "2. PROTOCOLO DE DERIVACIÓN HUMANA (CONFIANZA < 80%): Si la pregunta del usuario es ambigua, requiere decisiones administrativas "
-                "delicadas o consideras que tu nivel de certeza/confianza para responder de forma exacta es menor al 80%, DEBES declinar la respuesta "
-                "amablemente y derivar al usuario con un voluntario encargado mediante los canales oficiales.\n\n"
+                "1. PROTOCOLO DE EMERGENCIA MÉDICA: Si el usuario menciona 'fiebre alta', 'convulsión', 'dificultad para respirar' o emergencias, "
+                "interrumpe el flujo normal, indica buscar atención médica urgente, ve al centro de salud más cercano y llama a los números del albergue.\n"
+                "2. PROTOCOLO DE DERIVACIÓN HUMANA (CONFIANZA < 80%): Si la certeza de tu respuesta es menor al 80% o requiere decisiones "
+                "humanas delicadas, declina amablemente y deriva con un voluntario encargado por canales oficiales.\n\n"
                 
-                "--- TEMAS ESTRICTAMENTE FUERA DE ALCANCE (RESTRICCIONES) ---\n"
-                "- DIAGNÓSTICO MÉDICO: Tienes prohibido emitir diagnósticos. Si te preguntan qué enfermedad tiene un niño, responde firmemente "
-                "que esa información solo la puede brindar el médico tratante o personal de salud autorizado.\n"
-                "- MODIFICACIÓN DE TRATAMIENTOS: No puedes sugerir cambios en medicamentos, dosis, horarios ni indicaciones. Solo puedes "
-                "mostrar o explicar lo que ya esté textualmente registrado en una receta validada, sin alterarlo.\n"
-                "- INFORMACIÓN PERSONAL DE VOLUNTARIOS: Por privacidad y seguridad, jamás compartas números personales, direcciones ni datos "
-                "privados de los trabajadores o voluntarios. Solo ofrece los canales oficiales de contacto de ALDIMI.\n"
-                "- TEMAS NO RELACIONADOS: Filtra y rechaza amablemente consultas ajenas al albergue (política, deportes, entretenimiento, etc.). "
-                "Redirige al usuario cordialmente hacia los objetivos del asistente administrativo."
+                "--- TEMAS ESTRICTAMENTE FUERA DE ALCANCE (REGLAS DE NEGOCIO) ---\n"
+                "- DIAGNÓSTICO MÉDICO: Prohibido diagnosticar. Remite siempre al médico tratante.\n"
+                "- MODIFICACIÓN DE TRATAMIENTOS: No alteres dosis, medicamentos ni horarios de recetas. Solo explica lo registrado.\n"
+                "- INFORMACIÓN PERSONAL: Jamás compartas datos privados o teléfonos de trabajadores/voluntarios. Solo canales oficiales.\n"
+                "- TEMAS NO RELACIONADOS: Filtra política, deportes o entretenimiento. Mantén el foco en ALDIMI."
             )
         }
 
-        # Recuperamos la memoria RAM (MongoDB)
+        # 3. Recuperamos la memoria RAM de la sesión (MongoDB)
         historial = self.obtener_historial_contexto(session_id)
         
-        # Guardamos la entrada actual del usuario
+        # Guardamos la entrada del usuario
         self.guardar_mensaje(session_id, "user", mensaje_usuario)
         
-        # Consolidamos el paquete total para Groq
+        # Consolidamos los mensajes para Groq
         mensajes_completos = [system_prompt] + historial + [{"role": "user", "content": mensaje_usuario}]
 
         try:
             completions = self.client.chat.completions.create(
                 model=self.model,
                 messages=mensajes_completos,
-                temperature=0.2 # Temperatura ultra baja para asegurar obediencia ciega a los protocolos
+                temperature=0.2
             )
             respuesta_bot = completions.choices[0].message.content
             
-            # Guardamos la respuesta limpia del asistente
+            # Guardamos la respuesta del asistente en MongoDB
             self.guardar_mensaje(session_id, "assistant", respuesta_bot)
             return respuesta_bot
 
         except Exception as e:
             print(f"❌ Error al procesar la solicitud en el motor de IA: {e}")
             return "Lo siento, en este momento tengo problemas para conectar con mi motor de lenguaje. Por favor intenta de nuevo."
+        
+    def obtener_historial_contexto(self, session_id: str):
+            """
+            Recupera el historial de chat de MongoDB usando history_collection
+            """
+            if self.history_collection is None:
+                return []
+            try:
+                # 💡 Cambiado de self.chat_logs a self.history_collection
+                logs = self.history_collection.find({"session_id": session_id}).sort("timestamp", 1)
+                
+                historial = []
+                for log in logs:
+                    historial.append({
+                        "role": log.get("role"),
+                        "content": log.get("content")
+                    })
+                return historial
+            except Exception as e:
+                print(f"⚠️ Error al recuperar historial de MongoDB: {e}")
+                return []
+
+    def guardar_mensaje(self, session_id: str, role: str, content: str):
+        """
+        Guarda un nuevo mensaje en MongoDB usando history_collection
+        """
+        if self.history_collection is None:
+            return
+        from datetime import datetime, timezone
+        try:
+            # 💡 Cambiado de self.chat_logs a self.history_collection
+            self.history_collection.insert_one({
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now(timezone.utc)
+            })
+        except Exception as e:
+            print(f"⚠️ Error al guardar mensaje en MongoDB: {e}")
