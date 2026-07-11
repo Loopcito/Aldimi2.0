@@ -1,1 +1,12 @@
+# Ignorar entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Ignorar caché de Python
+**/__pycache__/
+*.pyc
+
+# Ignorar variables de entorno con credenciales personales
 .env
